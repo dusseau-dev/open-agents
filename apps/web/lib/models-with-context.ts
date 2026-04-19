@@ -1,6 +1,6 @@
 import "server-only";
 
-import { gateway } from "ai";
+import { aiProvider as gateway } from "@/lib/ai-provider";
 import { z } from "zod";
 import { filterDisabledModels } from "./model-availability";
 import type {

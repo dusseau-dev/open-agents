@@ -1,6 +1,5 @@
 {
   "lockfileVersion": 1,
-  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "open-harness",
@@ -23,6 +22,7 @@
         "@open-harness/agent": "workspace:*",
         "@open-harness/sandbox": "workspace:*",
         "@open-harness/shared": "workspace:*",
+        "@openrouter/ai-sdk-provider": "^2.8.0",
         "@pierre/diffs": "^1.0.10",
         "@radix-ui/react-avatar": "^1.1.11",
         "@radix-ui/react-dialog": "^1.1.15",
@@ -83,6 +83,7 @@
         "@ai-sdk/anthropic": "catalog:",
         "@ai-sdk/openai": "catalog:",
         "@open-harness/sandbox": "workspace:*",
+        "@openrouter/ai-sdk-provider": "^2.8.0",
         "ai": "catalog:",
         "zod": "catalog:",
       },
@@ -483,6 +484,8 @@
     "@open-harness/shared": ["@open-harness/shared@workspace:packages/shared"],
 
     "@open-harness/tsconfig": ["@open-harness/tsconfig@workspace:packages/tsconfig"],
+
+    "@openrouter/ai-sdk-provider": ["@openrouter/ai-sdk-provider@2.8.0", "", { "peerDependencies": { "ai": "^6.0.0", "zod": "^3.25.0 || ^4.0.0" } }, "sha512-oDDW/0KMqz4suHVloB9sNv0YyKLGNYf1FTevXH6adDkid5dsmbbcYuiEsbIhpZSZtHa6o5AVjK1jEAfePOLxww=="],
 
     "@opentelemetry/api": ["@opentelemetry/api@1.9.0", "", {}, "sha512-3giAOQvZiH5F9bMlMiv8+GSPMeqg0dbaeo58/0SlA9sxSqZhnUtxzX9/2FzyhS9sWQf5S0GJE0AKBrFqjpeYcg=="],
 

@@ -1,0 +1,42 @@
+diff --git a/apps/web/lib/models-with-context.ts b/apps/web/lib/models-with-context.ts
+index d8c16cdc..05c595b7 100644
+--- a/apps/web/lib/models-with-context.ts
++++ b/apps/web/lib/models-with-context.ts
+@@ -1,6 +1,6 @@
+ import "server-only";
+ 
+-import { gateway } from "ai";
++import { aiProvider as gateway } from "@/lib/ai-provider";
+ import { z } from "zod";
+ import { filterDisabledModels } from "./model-availability";
+ import type {
+diff --git a/packages/agent/models.ts b/packages/agent/models.ts
+index 81517e2f..2a82a896 100644
+--- a/packages/agent/models.ts
++++ b/packages/agent/models.ts
+@@ -1,12 +1,24 @@
+ import {
+   createGateway,
+   defaultSettingsMiddleware,
+-  gateway as aiGateway,
++  gateway as vercelAiGateway,
+   wrapLanguageModel,
+   type GatewayModelId,
+   type JSONValue,
+   type LanguageModel,
+ } from "ai";
++import { createOpenRouter } from "@openrouter/ai-sdk-provider";
++
++// Fork change: route inference through OpenRouter by default when
++// OPENROUTER_API_KEY is present. Falls back to Vercel AI Gateway otherwise.
++// See apps/web/lib/ai-provider.ts for the matching model-list adapter.
++const openRouterApiKey = process.env.OPENROUTER_API_KEY;
++const openRouterGateway = openRouterApiKey
++  ? createOpenRouter({ apiKey: openRouterApiKey })
++  : null;
++const aiGateway = openRouterGateway
++  ? (openRouterGateway as unknown as typeof vercelAiGateway)
++  : vercelAiGateway;
+ import { devToolsMiddleware } from "@ai-sdk/devtools";
+ import type { AnthropicLanguageModelOptions } from "@ai-sdk/anthropic";
+ import type { OpenAIResponsesProviderOptions } from "@ai-sdk/openai";

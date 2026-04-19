@@ -22,6 +22,7 @@
     "@open-harness/agent": "workspace:*",
     "@open-harness/sandbox": "workspace:*",
     "@open-harness/shared": "workspace:*",
+    "@openrouter/ai-sdk-provider": "^2.8.0",
     "@pierre/diffs": "^1.0.10",
     "@radix-ui/react-avatar": "^1.1.11",
     "@radix-ui/react-dialog": "^1.1.15",

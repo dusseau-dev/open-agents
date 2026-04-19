@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# Post-merge hook — auto-re-apply the OpenRouter patch if an upstream merge
+# reverted our fork-specific changes.
+#
+# Triggered automatically after `git merge`, `git pull`, etc.
+#
+# What this guards:
+#   - apps/web/lib/models-with-context.ts (imports aiProvider adapter)
+#   - packages/agent/models.ts (routes inference through OpenRouter)
+#
+# Detection: looks for a sentinel import line. If absent, applies the saved
+# patch at scripts/openrouter-patch.diff.
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+PATCH_FILE="$REPO_ROOT/scripts/openrouter-patch.diff"
+
+# Sentinels — presence means patch is applied.
+SENTINEL_MODELS_WITH_CONTEXT='from "@/lib/ai-provider"'
+SENTINEL_AGENT_MODELS='@openrouter/ai-sdk-provider'
+
+needs_patch=false
+
+if ! grep -q "$SENTINEL_MODELS_WITH_CONTEXT" \
+  "$REPO_ROOT/apps/web/lib/models-with-context.ts" 2>/dev/null; then
+  needs_patch=true
+fi
+
+if ! grep -q "$SENTINEL_AGENT_MODELS" \
+  "$REPO_ROOT/packages/agent/models.ts" 2>/dev/null; then
+  needs_patch=true
+fi
+
+if [ "$needs_patch" = false ]; then
+  exit 0
+fi
+
+echo "[githooks/post-merge] OpenRouter patch missing — re-applying."
+
+if [ ! -f "$PATCH_FILE" ]; then
+  echo "[githooks/post-merge] ERROR: $PATCH_FILE not found. Run"
+  echo "  git diff main -- apps/web/lib/models-with-context.ts packages/agent/models.ts > scripts/openrouter-patch.diff"
+  echo "to regenerate it, or restore the files manually."
+  exit 1
+fi
+
+if ! git apply --check "$PATCH_FILE" 2>/dev/null; then
+  echo "[githooks/post-merge] WARNING: patch does not apply cleanly against current tree."
+  echo "  Resolve manually: review $PATCH_FILE and edit the files, then commit."
+  echo "  After fixing, regenerate the patch with:"
+  echo "    git diff HEAD -- apps/web/lib/models-with-context.ts packages/agent/models.ts > scripts/openrouter-patch.diff"
+  exit 1
+fi
+
+git apply "$PATCH_FILE"
+echo "[githooks/post-merge] Re-applied $PATCH_FILE"
+echo "  Review with 'git diff' and commit when ready."
