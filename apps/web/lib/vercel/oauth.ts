@@ -23,7 +23,7 @@ export function getVercelAuthorizationUrl(params: {
   const searchParams = new URLSearchParams({
     client_id: params.clientId,
     redirect_uri: params.redirectUri,
-    scope: "openid email profile offline_access",
+    scope: "openid",
     response_type: "code",
     code_challenge: params.codeChallenge,
     code_challenge_method: "S256",
