@@ -19,10 +19,21 @@ export function FileTree({ files, repoName, onFileClick }: FileTreeProps) {
 
   const paths = useMemo(() => {
     const prefix = repoName ? `${repoName}/` : "";
-    return files.map((f) => {
-      const normalized = f.isDirectory ? f.value.replace(/\/?$/, "/") : f.value;
-      return `${prefix}${normalized}`;
-    });
+    // Pierre's tree auto-builds directory nesting from file paths. Including
+    // both the file paths AND the API's explicit directory entries causes
+    // "Path collides with an existing entry" crashes when a file's name
+    // matches a sibling directory (e.g. a file named `__tests__` next to a
+    // `__tests__/` dir). Pass file paths only and dedupe defensively.
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const f of files) {
+      if (f.isDirectory) continue;
+      const path = `${prefix}${f.value}`;
+      if (seen.has(path)) continue;
+      seen.add(path);
+      result.push(path);
+    }
+    return result;
   }, [files, repoName]);
 
   const handleSelectionChange = useCallback(
