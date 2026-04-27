@@ -1,5 +1,5 @@
-import type { SandboxState } from "@open-harness/sandbox";
-import { and, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
+import type { SandboxState } from "@open-agents/sandbox";
+import { and, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { db } from "./client";
 import {
   chatMessages,
@@ -469,8 +469,152 @@ export async function compareAndSetChatActiveStreamId(
   return Boolean(updated);
 }
 
+/**
+ * Idempotently claims the activeStreamId slot for the given workflow run.
+ *
+ * Returns true when the slot is now owned by `workflowRunId` — i.e. it was
+ * either null (we just set it) or already equal to `workflowRunId` (no-op).
+ * Returns false when the slot is set to a different runId (conflict).
+ *
+ * Used so a workflow can self-persist its runId as its first step, ensuring
+ * `activeStreamId` is recorded as long as the workflow itself is running —
+ * even if the HTTP handler that started it was killed before its own CAS
+ * write completed.
+ */
+export async function claimChatActiveStreamId(
+  chatId: string,
+  workflowRunId: string,
+): Promise<boolean> {
+  const [updated] = await db
+    .update(chats)
+    .set({ activeStreamId: workflowRunId })
+    .where(
+      and(
+        eq(chats.id, chatId),
+        or(
+          isNull(chats.activeStreamId),
+          eq(chats.activeStreamId, workflowRunId),
+        ),
+      ),
+    )
+    .returning({ id: chats.id });
+
+  return Boolean(updated);
+}
+
 export async function deleteChat(chatId: string) {
   await db.delete(chats).where(eq(chats.id, chatId));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function cloneChatMessagePartsWithId(parts: unknown, id: string): unknown {
+  const clonedParts = structuredClone(parts);
+  if (!isRecord(clonedParts)) {
+    return clonedParts;
+  }
+
+  return {
+    ...clonedParts,
+    id,
+  };
+}
+
+type ForkChatThroughMessageInput = {
+  userId: string;
+  sourceChatId: string;
+  throughMessageId: string;
+  forkedChat: Pick<NewChat, "id" | "sessionId" | "title" | "modelId">;
+};
+
+type ForkChatThroughMessageResult =
+  | { status: "created"; chat: typeof chats.$inferSelect }
+  | { status: "message_not_found" }
+  | { status: "not_assistant_message" };
+
+export async function forkChatThroughMessage(
+  input: ForkChatThroughMessageInput,
+): Promise<ForkChatThroughMessageResult> {
+  return db.transaction(async (tx) => {
+    const sourceMessages = await tx
+      .select({
+        id: chatMessages.id,
+        role: chatMessages.role,
+        parts: chatMessages.parts,
+        createdAt: chatMessages.createdAt,
+      })
+      .from(chatMessages)
+      .where(eq(chatMessages.chatId, input.sourceChatId))
+      .orderBy(chatMessages.createdAt, chatMessages.id);
+
+    const throughMessageIndex = sourceMessages.findIndex(
+      (message) => message.id === input.throughMessageId,
+    );
+    if (throughMessageIndex < 0) {
+      return { status: "message_not_found" };
+    }
+
+    const throughMessage = sourceMessages[throughMessageIndex];
+    if (!throughMessage || throughMessage.role !== "assistant") {
+      return { status: "not_assistant_message" };
+    }
+
+    const now = new Date();
+    const [forkedChat] = await tx
+      .insert(chats)
+      .values({
+        ...input.forkedChat,
+        activeStreamId: null,
+        lastAssistantMessageAt: throughMessage.createdAt,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    if (!forkedChat) {
+      throw new Error("Failed to create forked chat");
+    }
+
+    const messagesToCopy = sourceMessages.slice(0, throughMessageIndex + 1);
+    if (messagesToCopy.length > 0) {
+      await tx.insert(chatMessages).values(
+        messagesToCopy.map((message) => {
+          const forkedMessageId = crypto.randomUUID();
+          return {
+            id: forkedMessageId,
+            chatId: forkedChat.id,
+            role: message.role,
+            parts: cloneChatMessagePartsWithId(message.parts, forkedMessageId),
+            createdAt: message.createdAt,
+          };
+        }),
+      );
+    }
+
+    await tx
+      .insert(chatReads)
+      .values({
+        userId: input.userId,
+        chatId: forkedChat.id,
+        lastReadAt: now,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [chatReads.userId, chatReads.chatId],
+        set: {
+          lastReadAt: now,
+          updatedAt: now,
+        },
+      });
+
+    return {
+      status: "created",
+      chat: forkedChat,
+    };
+  });
 }
 
 export async function createChatMessage(data: NewChatMessage) {

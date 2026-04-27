@@ -11,10 +11,10 @@ index d8c16cdc..05c595b7 100644
  import { filterDisabledModels } from "./model-availability";
  import type {
 diff --git a/packages/agent/models.ts b/packages/agent/models.ts
-index 81517e2f..2a82a896 100644
+index eb4f7b40..457e9434 100644
 --- a/packages/agent/models.ts
 +++ b/packages/agent/models.ts
-@@ -1,12 +1,24 @@
+@@ -1,15 +1,27 @@
  import {
    createGateway,
    defaultSettingsMiddleware,
@@ -26,7 +26,9 @@ index 81517e2f..2a82a896 100644
    type LanguageModel,
  } from "ai";
 +import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-+
+ import type { AnthropicLanguageModelOptions } from "@ai-sdk/anthropic";
+ import type { OpenAIResponsesProviderOptions } from "@ai-sdk/openai";
+ 
 +// Fork change: route inference through OpenRouter by default when
 +// OPENROUTER_API_KEY is present. Falls back to Vercel AI Gateway otherwise.
 +// See apps/web/lib/ai-provider.ts for the matching model-list adapter.
@@ -37,6 +39,7 @@ index 81517e2f..2a82a896 100644
 +const aiGateway = openRouterGateway
 +  ? (openRouterGateway as unknown as typeof vercelAiGateway)
 +  : vercelAiGateway;
- import { devToolsMiddleware } from "@ai-sdk/devtools";
- import type { AnthropicLanguageModelOptions } from "@ai-sdk/anthropic";
- import type { OpenAIResponsesProviderOptions } from "@ai-sdk/openai";
++
+ function supportsAdaptiveAnthropicThinking(modelId: string): boolean {
+   return modelId.includes("4.6") || modelId.includes("4.7");
+ }

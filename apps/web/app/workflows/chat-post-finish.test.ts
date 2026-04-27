@@ -14,6 +14,7 @@ const sandboxExec = mock(() =>
 );
 
 const spies = {
+  claimChatActiveStreamId: mock(() => Promise.resolve(true)),
   compareAndSetChatActiveStreamId: mock(() => Promise.resolve(true)),
   createChatMessageIfNotExists: mock(
     () =>
@@ -55,6 +56,7 @@ const spies = {
 // ── Module mocks (must appear before the module-under-test import) ──
 
 mock.module("@/lib/db/sessions", () => ({
+  claimChatActiveStreamId: spies.claimChatActiveStreamId,
   compareAndSetChatActiveStreamId: spies.compareAndSetChatActiveStreamId,
   createChatMessageIfNotExists: spies.createChatMessageIfNotExists,
   isFirstChatMessage: spies.isFirstChatMessage,
@@ -74,7 +76,7 @@ mock.module("@/lib/sandbox/lifecycle", () => ({
   buildLifecycleActivityUpdate: spies.buildLifecycleActivityUpdate,
 }));
 
-mock.module("@open-harness/sandbox", () => ({
+mock.module("@open-agents/sandbox", () => ({
   connectSandbox: spies.connectSandbox,
 }));
 
@@ -174,9 +176,9 @@ describe("persistUserMessage", () => {
     });
   });
 
-  test("truncates title when text exceeds 30 chars", async () => {
+  test("truncates title when text exceeds 80 chars", async () => {
     isFirstChatMessageResult = true;
-    const longText = "A".repeat(50);
+    const longText = "A".repeat(100);
     const msg = makeUserMessage({
       parts: [{ type: "text", text: longText }],
     });
@@ -184,7 +186,7 @@ describe("persistUserMessage", () => {
     await persistUserMessage("chat-1", msg);
 
     expect(spies.updateChat).toHaveBeenCalledWith("chat-1", {
-      title: `${"A".repeat(30)}...`,
+      title: `${"A".repeat(80)}...`,
     });
   });
 

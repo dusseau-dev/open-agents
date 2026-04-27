@@ -1,0 +1,164 @@
+name: Upstream sync
+
+# Auto-merge upstream changes from vercel-labs/open-agents into our fork.
+# Runs daily and on manual dispatch.
+#
+# Strategy:
+#   1. Fetch upstream/main.
+#   2. Try to merge it into a sync branch.
+#   3. If clean, push and open a PR for review.
+#   4. If conflicts, open an issue with details so we can resolve manually.
+#
+# Patch hook: the post-merge git hook auto-re-applies our OpenRouter
+# patch when conflicts touch packages/agent/models.ts or
+# apps/web/lib/models-with-context.ts. See FORK.md.
+
+on:
+  schedule:
+    # Daily at 09:00 UTC
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPO: vercel-labs/open-agents
+      UPSTREAM_BRANCH: main
+      LOCAL_BRANCH: main
+      SYNC_BRANCH: chore/upstream-sync
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream "${UPSTREAM_BRANCH}"
+
+      - name: Check if sync needed
+        id: check
+        run: |
+          BEHIND=$(git rev-list --count "${LOCAL_BRANCH}..upstream/${UPSTREAM_BRANCH}")
+          echo "behind=${BEHIND}" >> "$GITHUB_OUTPUT"
+          if [ "${BEHIND}" = "0" ]; then
+            echo "Fork is up to date with upstream. Nothing to do."
+          else
+            echo "Fork is ${BEHIND} commits behind upstream."
+          fi
+
+      - name: Create sync branch
+        if: steps.check.outputs.behind != '0'
+        run: |
+          git checkout -B "${SYNC_BRANCH}" "${LOCAL_BRANCH}"
+
+      - name: Attempt merge
+        id: merge
+        if: steps.check.outputs.behind != '0'
+        run: |
+          set +e
+          git merge --no-edit "upstream/${UPSTREAM_BRANCH}"
+          MERGE_STATUS=$?
+          set -e
+          if [ "$MERGE_STATUS" = "0" ]; then
+            echo "result=clean" >> "$GITHUB_OUTPUT"
+          else
+            CONFLICTS=$(git diff --name-only --diff-filter=U | tr '\n' ',' | sed 's/,$//')
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+            echo "conflicts=${CONFLICTS}" >> "$GITHUB_OUTPUT"
+            git merge --abort
+          fi
+
+      - name: Run post-merge patch hook
+        if: steps.merge.outputs.result == 'clean'
+        run: |
+          if [ -x scripts/githooks/post-merge ]; then
+            scripts/githooks/post-merge || true
+          fi
+          # Stage any reapplied patch changes.
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "fork: re-apply OpenRouter patch after upstream sync"
+          fi
+
+      - name: Push sync branch
+        if: steps.merge.outputs.result == 'clean'
+        run: |
+          git push origin "${SYNC_BRANCH}" --force
+
+      - name: Open or update PR
+        if: steps.merge.outputs.result == 'clean'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BEHIND=${{ steps.check.outputs.behind }}
+          TITLE="chore: sync ${BEHIND} commits from upstream/${UPSTREAM_BRANCH}"
+          BODY=$(cat <<'EOF'
+          Automated upstream sync from `vercel-labs/open-agents@main`.
+
+          The merge applied cleanly. Review the changes, run any local tests, and merge when ready.
+
+          - Fork patch (OpenRouter routing) re-applied automatically by `scripts/githooks/post-merge`
+          - Verify with `bunx turbo typecheck`
+          EOF
+          )
+          # Reuse existing PR if present.
+          EXISTING=$(gh pr list --head "${SYNC_BRANCH}" --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh pr edit "$EXISTING" --title "$TITLE" --body "$BODY"
+          else
+            gh pr create --base "${LOCAL_BRANCH}" --head "${SYNC_BRANCH}" \
+              --title "$TITLE" --body "$BODY"
+          fi
+
+      - name: Open issue on conflict
+        if: steps.merge.outputs.result == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BEHIND=${{ steps.check.outputs.behind }}
+          CONFLICTS="${{ steps.merge.outputs.conflicts }}"
+          TITLE="Upstream sync conflict (${BEHIND} commits behind)"
+          BODY=$(cat <<EOF
+          The automated upstream sync hit merge conflicts and could not proceed.
+
+          **Conflicting files:**
+          \`\`\`
+          ${CONFLICTS}
+          \`\`\`
+
+          **Manual steps to resolve:**
+          \`\`\`bash
+          git fetch upstream
+          git checkout -b chore/upstream-sync
+          git merge upstream/main
+          # resolve conflicts, then:
+          bash scripts/githooks/post-merge   # re-apply OpenRouter patch if needed
+          bunx turbo typecheck
+          git push origin chore/upstream-sync
+          \`\`\`
+
+          Then open a PR against \`main\`.
+          EOF
+          )
+          # Avoid duplicate issues — reuse the open one if any.
+          EXISTING=$(gh issue list --label "upstream-sync" --state open --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "Re-detected at $(date -u). Conflicts: ${CONFLICTS}"
+          else
+            gh issue create --title "$TITLE" --body "$BODY" --label "upstream-sync" || \
+              gh issue create --title "$TITLE" --body "$BODY"
+          fi

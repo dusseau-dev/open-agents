@@ -1,7 +1,7 @@
 "use client";
 
-import type { AskUserQuestionInput } from "@open-harness/agent";
-import { formatTokens } from "@open-harness/shared";
+import type { AskUserQuestionInput } from "@open-agents/agent";
+import { formatTokens } from "@open-agents/shared";
 import {
   isReasoningUIPart,
   isToolUIPart,
@@ -16,6 +16,7 @@ import {
   Code2,
   Copy,
   ExternalLink,
+  GitBranch,
   GitCommitHorizontal,
   GitPullRequest,
   Globe,
@@ -67,6 +68,7 @@ import { useInlineQuestion } from "@/components/inline-question-input";
 import { SlashCommandDropdown } from "@/components/slash-command-dropdown";
 import { SnippetChip } from "@/components/snippet-chip";
 import { AssistantMessageGroups } from "@/components/assistant-message-groups";
+import { MessageModelPill } from "@/components/message-model-pill";
 import {
   PinnedTodoPanel,
   getLatestTodos,
@@ -107,6 +109,7 @@ import {
   shouldKeepCollapsedReasoningStreaming,
   shouldRenderGitDataPart,
   shouldShowThinkingIndicator,
+  shouldUseChatListStreamingState,
 } from "@/lib/chat-streaming-state";
 import { ACCEPT_IMAGE_TYPES, isValidImageType } from "@/lib/image-utils";
 import { isLargeText } from "@/lib/text-attachment-utils";
@@ -489,15 +492,46 @@ function getConversationUsage(
   }, getUsageTotals(undefined));
 }
 
-function getConversationEstimatedCost(
+type ConversationCostSource = "gateway" | "estimate" | "mixed";
+
+type ConversationCost = {
+  total: number;
+  source: ConversationCostSource;
+};
+
+/**
+ * Compute the cumulative USD cost across every assistant message in the
+ * conversation. Per-message preference order:
+ *   1. Gateway-reported `totalMessageCost` (authoritative when present).
+ *   2. Token-based estimate from `totalMessageUsage` / `lastStepUsage`.
+ *
+ * Returns `undefined` when no cost can be attributed to any message (e.g. no
+ * usage metadata and no gateway cost), matching the previous "hide the row"
+ * behavior. The `source` discriminant lets the UI label the figure correctly.
+ */
+function getConversationCost(
   messages: WebAgentUIMessage[],
   modelCost: AvailableModelCost | undefined,
-): number | undefined {
-  let totalCost = 0;
-  let hasUsage = false;
+): ConversationCost | undefined {
+  let total = 0;
+  let hasAnyCost = false;
+  let sawGateway = false;
+  let sawEstimate = false;
 
   for (const message of messages) {
     if (message.role !== "assistant") {
+      continue;
+    }
+
+    const gatewayCost = message.metadata?.totalMessageCost;
+    if (
+      typeof gatewayCost === "number" &&
+      Number.isFinite(gatewayCost) &&
+      gatewayCost >= 0
+    ) {
+      total += gatewayCost;
+      hasAnyCost = true;
+      sawGateway = true;
       continue;
     }
 
@@ -512,14 +546,22 @@ function getConversationEstimatedCost(
       modelCost,
     );
     if (estimatedCost === undefined) {
-      return undefined;
+      continue;
     }
 
-    totalCost += estimatedCost;
-    hasUsage = true;
+    total += estimatedCost;
+    hasAnyCost = true;
+    sawEstimate = true;
   }
 
-  return hasUsage ? totalCost : undefined;
+  if (!hasAnyCost) {
+    return undefined;
+  }
+
+  const source: ConversationCostSource =
+    sawGateway && sawEstimate ? "mixed" : sawGateway ? "gateway" : "estimate";
+
+  return { total, source };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -573,14 +615,14 @@ function ContextUsageIndicator({
   conversationInputTokens,
   conversationCachedInputTokens,
   conversationOutputTokens,
-  estimatedConversationCost,
+  conversationCost,
   contextLimit,
 }: {
   inputTokens: number;
   conversationInputTokens: number;
   conversationCachedInputTokens: number;
   conversationOutputTokens: number;
-  estimatedConversationCost?: number;
+  conversationCost?: ConversationCost;
   contextLimit: number;
 }) {
   if (inputTokens === 0) {
@@ -634,10 +676,18 @@ function ContextUsageIndicator({
             <span className="opacity-60">Conversation output</span>
             <span>{formatTokens(conversationOutputTokens)}</span>
           </div>
-          {estimatedConversationCost !== undefined ? (
+          {conversationCost !== undefined ? (
             <div className="flex justify-between gap-6">
-              <span className="opacity-60">Est. cost</span>
-              <span>{formatUsd(estimatedConversationCost)}</span>
+              <span className="opacity-60">
+                {conversationCost.source === "gateway"
+                  ? "Cost"
+                  : conversationCost.source === "mixed"
+                    ? "Cost (partial est.)"
+                    : "Est. cost"}
+              </span>
+              <span className="tabular-nums">
+                {formatUsd(conversationCost.total)}
+              </span>
             </div>
           ) : null}
         </div>
@@ -1004,6 +1054,7 @@ export function SessionChatContent({
   messageDurationMap,
   messageStartedAtMap,
   lastUserMessageSentAt,
+  codeEditorDisabledReason,
 }: {
   initialIsOnlyChatInSession: boolean;
   /** Pre-computed generation duration (ms) per assistant message ID */
@@ -1012,6 +1063,7 @@ export function SessionChatContent({
   messageStartedAtMap: Record<string, string>;
   /** Fallback: last user message's createdAt, for refresh-during-stream */
   lastUserMessageSentAt: string | null;
+  codeEditorDisabledReason: string | null;
 }) {
   const router = useRouter();
   const [input, setInput] = useState("");
@@ -1030,6 +1082,9 @@ export function SessionChatContent({
   const [cursorPosition, setCursorPosition] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [copiedAssistantMessageId, setCopiedAssistantMessageId] = useState<
+    string | null
+  >(null);
+  const [forkingAssistantMessageId, setForkingAssistantMessageId] = useState<
     string | null
   >(null);
   const [branchPreviewUrlChangeBaseline, setBranchPreviewUrlChangeBaseline] =
@@ -1258,12 +1313,43 @@ export function SessionChatContent({
     addToolOutput,
   } = chat;
   const {
+    chats,
     markChatRead,
     setChatStreaming,
     setChatTitle,
     clearChatTitle,
     refreshChats,
+    forkChat,
   } = useSessionChats(session.id);
+  const currentChatListItem = useMemo(
+    () => chats.find((candidate) => candidate.id === chatInfo.id) ?? null,
+    [chatInfo.id, chats],
+  );
+  const handleForkAssistantMessage = useCallback(
+    async (messageId: string) => {
+      if (forkingAssistantMessageId !== null) {
+        return;
+      }
+
+      setForkingAssistantMessageId(messageId);
+      try {
+        const { persisted } = forkChat(chatInfo.id, messageId);
+        const forkedChat = await persisted;
+        router.push(`/sessions/${session.id}/chats/${forkedChat.id}`, {
+          scroll: false,
+        });
+      } catch (forkError) {
+        console.error("Failed to fork chat:", forkError);
+      } finally {
+        if (isMountedRef.current) {
+          setForkingAssistantMessageId((currentMessageId) =>
+            currentMessageId === messageId ? null : currentMessageId,
+          );
+        }
+      }
+    },
+    [chatInfo.id, forkChat, forkingAssistantMessageId, router, session.id],
+  );
   const upsertSyntheticAssistantGitMessage = useCallback(
     async (message: WebAgentUIMessage) => {
       setMessages((currentMessages) => {
@@ -1339,6 +1425,23 @@ export function SessionChatContent({
         : false,
     [lastMessage],
   );
+  const shouldUseChatListStreaming = useMemo(
+    () =>
+      shouldUseChatListStreamingState({
+        status,
+        hasChatListStreaming: currentChatListItem?.isStreaming ?? false,
+        userStopped,
+        hasAssistantRenderableContent,
+        lastMessageRole: lastMessage?.role,
+      }),
+    [
+      currentChatListItem?.isStreaming,
+      hasAssistantRenderableContent,
+      lastMessage?.role,
+      status,
+      userStopped,
+    ],
+  );
   const hasSeenAssistantRenderableContentRef = useRef(false);
   const [hasPendingResponse, setHasPendingResponse] = useState(false);
   /** Captures Date.now() when the user sends a message, so the streaming
@@ -1358,7 +1461,7 @@ export function SessionChatContent({
   // immediately clear it because status is still "ready" at that point —
   // resulting in a visible flicker of the thinking indicator and stop button.
   useEffect(() => {
-    if (isChatInFlight) {
+    if (isChatInFlight || shouldUseChatListStreaming) {
       setHasPendingResponse(true);
       return;
     }
@@ -1368,7 +1471,7 @@ export function SessionChatContent({
       setUserStopped(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see comment above
-  }, [isChatInFlight, status]);
+  }, [isChatInFlight, shouldUseChatListStreaming, status]);
 
   useEffect(() => {
     if (!isChatInFlight && !hasPendingResponse) {
@@ -1391,7 +1494,7 @@ export function SessionChatContent({
     hasSeenAssistantRenderableContentRef.current;
   const effectiveStatus = userStopped
     ? "ready"
-    : hasPendingResponse
+    : hasPendingResponse || shouldUseChatListStreaming
       ? "streaming"
       : status;
   const _isChatReady = effectiveStatus === "ready";
@@ -1574,8 +1677,13 @@ export function SessionChatContent({
     inFlight: false,
     lastAt: 0,
   });
+  const shouldSkipServerSnapshotOverwriteRef = useRef(false);
 
   const refreshCurrentChatSnapshot = useCallback(async (): Promise<void> => {
+    if (shouldSkipServerSnapshotOverwriteRef.current) {
+      return;
+    }
+
     const response = await fetch(
       `/api/sessions/${session.id}/chats/${chatInfo.id}`,
       {
@@ -1810,6 +1918,11 @@ export function SessionChatContent({
 
   const hasMessageActionInFlight =
     deletingMessageId !== null || resendingMessageId !== null || isChatInFlight;
+
+  shouldSkipServerSnapshotOverwriteRef.current =
+    hasPendingResponse ||
+    deletingMessageId !== null ||
+    resendingMessageId !== null;
 
   const sendMessageWithPendingState = useCallback(
     async (message: Parameters<typeof sendMessage>[0]) => {
@@ -2577,9 +2690,8 @@ export function SessionChatContent({
     () => getConversationUsage(renderMessages),
     [renderMessages],
   );
-  const conversationEstimatedCost = useMemo(
-    () =>
-      getConversationEstimatedCost(renderMessages, selectedModelOption?.cost),
+  const conversationCost = useMemo(
+    () => getConversationCost(renderMessages, selectedModelOption?.cost),
     [renderMessages, selectedModelOption?.cost],
   );
 
@@ -2743,14 +2855,19 @@ export function SessionChatContent({
     !isRestoringSnapshot &&
     !isReconnectingSandbox &&
     !isHibernatingUi;
+  const canUseCodeEditor = codeEditorDisabledReason === null;
   const devServer = useDevServer({
     sessionId: session.id,
     canRun: canRunDevServer,
   });
   const codeEditor = useCodeEditor({
     sessionId: session.id,
-    canRun: canRunDevServer,
+    canRun: canRunDevServer && canUseCodeEditor,
   });
+  const isCodeEditorActionDisabled =
+    !canUseCodeEditor ||
+    codeEditor.state.status === "starting" ||
+    codeEditor.state.status === "stopping";
 
   const hasRepo = Boolean(session.cloneUrl);
   const hasExistingPr = session.prNumber != null;
@@ -3032,25 +3149,27 @@ export function SessionChatContent({
               <>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="hidden h-7 w-7 sm:inline-flex"
-                      onClick={() => void codeEditor.handleOpen()}
-                      disabled={
-                        codeEditor.state.status === "starting" ||
-                        codeEditor.state.status === "stopping"
-                      }
-                    >
-                      {codeEditor.state.status === "starting" ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Code2 className="h-3.5 w-3.5" />
-                      )}
-                    </Button>
+                    <span className="hidden sm:inline-flex">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7"
+                        onClick={() => void codeEditor.handleOpen()}
+                        disabled={isCodeEditorActionDisabled}
+                      >
+                        {codeEditor.state.status === "starting" ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Code2 className="h-3.5 w-3.5" />
+                        )}
+                      </Button>
+                    </span>
                   </TooltipTrigger>
-                  <TooltipContent side="bottom">
-                    {codeEditor.menuLabel}
+                  <TooltipContent
+                    side="bottom"
+                    className="max-w-72 text-pretty"
+                  >
+                    {codeEditorDisabledReason ?? codeEditor.menuLabel}
                   </TooltipContent>
                 </Tooltip>
                 <div className="hidden h-7 items-center sm:flex">
@@ -3462,26 +3581,70 @@ export function SessionChatContent({
                                           >
                                             {p.text}
                                           </Streamdown>
-                                          {canCopyAssistantMessage && (
-                                            <div className="mt-1 flex justify-start">
-                                              <button
-                                                type="button"
-                                                onClick={() =>
-                                                  void handleCopyAssistantMessage(
-                                                    m.id,
-                                                    p.text,
-                                                  )
-                                                }
-                                                aria-label="Copy assistant response"
-                                                className="rounded p-1 text-muted-foreground opacity-0 transition hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
-                                              >
-                                                {copiedAssistantMessageId ===
-                                                m.id ? (
-                                                  <Check className="h-4 w-4" />
-                                                ) : (
-                                                  <Copy className="h-4 w-4" />
+                                          {(canCopyAssistantMessage ||
+                                            (!isMessageStreaming &&
+                                              isFinalAssistantTextPart &&
+                                              m.metadata)) && (
+                                            <div className="mt-1 flex items-center justify-start">
+                                              {canCopyAssistantMessage && (
+                                                <div className="flex items-center gap-1">
+                                                  <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                      void handleCopyAssistantMessage(
+                                                        m.id,
+                                                        p.text,
+                                                      )
+                                                    }
+                                                    aria-label="Copy assistant response"
+                                                    className="rounded p-1 text-muted-foreground opacity-0 transition hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
+                                                  >
+                                                    {copiedAssistantMessageId ===
+                                                    m.id ? (
+                                                      <Check className="h-4 w-4" />
+                                                    ) : (
+                                                      <Copy className="h-4 w-4" />
+                                                    )}
+                                                  </button>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                      void handleForkAssistantMessage(
+                                                        m.id,
+                                                      )
+                                                    }
+                                                    disabled={
+                                                      forkingAssistantMessageId !==
+                                                      null
+                                                    }
+                                                    aria-label="Fork conversation from this response"
+                                                    className={cn(
+                                                      "rounded p-1 text-muted-foreground opacity-0 transition hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-40",
+                                                      forkingAssistantMessageId ===
+                                                        m.id && "opacity-100",
+                                                    )}
+                                                  >
+                                                    {forkingAssistantMessageId ===
+                                                    m.id ? (
+                                                      <Loader2 className="h-4 w-4 animate-spin" />
+                                                    ) : (
+                                                      <GitBranch className="h-4 w-4" />
+                                                    )}
+                                                  </button>
+                                                </div>
+                                              )}
+                                              {!isMessageStreaming &&
+                                                isFinalAssistantTextPart &&
+                                                m.metadata && (
+                                                  <span className="opacity-0 transition group-hover:opacity-100">
+                                                    <MessageModelPill
+                                                      metadata={m.metadata}
+                                                      modelOptions={
+                                                        modelOptions
+                                                      }
+                                                    />
+                                                  </span>
                                                 )}
-                                              </button>
                                             </div>
                                           )}
                                         </div>
@@ -3859,8 +4022,8 @@ export function SessionChatContent({
                             trimmedText.length > 0
                           ) {
                             const nextTitle =
-                              trimmedText.length > 30
-                                ? `${trimmedText.slice(0, 30)}...`
+                              trimmedText.length > 80
+                                ? `${trimmedText.slice(0, 80)}...`
                                 : trimmedText;
                             pendingOptimisticTitleChatIdRef.current =
                               chatInfo.id;
@@ -4095,7 +4258,7 @@ export function SessionChatContent({
                             >
                               <Paperclip className="h-4 w-4" />
                             </Button>
-                            {renderMessages.length === 0 && chatInfo.modelId ? (
+                            {chatInfo.modelId && (
                               <div
                                 className={
                                   isChatInFlight ||
@@ -4136,13 +4299,6 @@ export function SessionChatContent({
                                   }}
                                 />
                               </div>
-                            ) : (
-                              chatInfo.modelId && (
-                                <span className="max-w-28 truncate text-xs text-muted-foreground/60 sm:max-w-none">
-                                  {selectedModelOption?.label ??
-                                    chatInfo.modelId}
-                                </span>
-                              )
                             )}
                             <ContextUsageIndicator
                               inputTokens={tokenUsage.inputTokens}
@@ -4155,9 +4311,7 @@ export function SessionChatContent({
                               conversationOutputTokens={
                                 conversationUsage.outputTokens
                               }
-                              estimatedConversationCost={
-                                conversationEstimatedCost
-                              }
+                              conversationCost={conversationCost}
                               contextLimit={
                                 contextLimit ?? DEFAULT_CONTEXT_LIMIT
                               }
@@ -4340,6 +4494,7 @@ export function SessionChatContent({
           codeEditor.state.status === "starting" ||
           codeEditor.state.status === "stopping"
         }
+        editorDisabledReason={codeEditorDisabledReason}
         onOpenInEditor={(filePath) => {
           void codeEditor.handleOpenFile(filePath);
         }}

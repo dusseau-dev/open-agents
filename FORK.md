@@ -50,10 +50,12 @@ This sets `core.hooksPath=scripts/githooks` — hooks are tracked in the repo, n
 
 ### Regenerating the patch
 
-If you make additional fork changes, refresh the saved patch:
+If you make additional fork changes, refresh the saved patch. **Always diff against `upstream/main`**, not `HEAD` — otherwise the patch will include unrelated upstream changes:
 
 ```bash
-git diff HEAD -- apps/web/lib/models-with-context.ts packages/agent/models.ts > scripts/openrouter-patch.diff
+git fetch upstream  # ensure upstream/main ref is current
+git diff upstream/main -- apps/web/lib/models-with-context.ts packages/agent/models.ts \
+  > scripts/openrouter-patch.diff
 ```
 
 Commit the updated `.diff` with your changes.
