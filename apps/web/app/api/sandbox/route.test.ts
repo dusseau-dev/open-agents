@@ -63,7 +63,6 @@ const dotenvSyncCalls: Array<Record<string, unknown>> = [];
 
 let sessionRecord: TestSessionRecord;
 let currentVercelAuthInfo: TestVercelAuthInfo | null;
-let currentGitHubToken: string | null;
 let currentDotenvContent: string;
 let currentDotenvError: Error | null;
 
@@ -78,12 +77,42 @@ mock.module("@/lib/session/get-server-session", () => ({
   }),
 }));
 
-mock.module("@/lib/github/token", () => ({
+mock.module("@/lib/github/users", () => ({
   getGitHubUserProfile: async () => ({
     externalUserId: "12345",
     username: "nico-gh",
   }),
-  getUserGitHubToken: async () => currentGitHubToken,
+}));
+
+mock.module("@/lib/github/client", () => ({
+  parseGitHubUrl: (repoUrl: string) => {
+    const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+?)(\.git)?$/);
+    if (!match?.[1] || !match[2]) {
+      return null;
+    }
+    return { owner: match[1], repo: match[2] };
+  },
+}));
+
+mock.module("@/lib/github/access", () => ({
+  verifyRepoAccess: async () => ({
+    ok: true,
+    installationId: 999,
+    repositoryId: 123,
+    defaultBranch: "main",
+  }),
+  getRepoAccessErrorMessage: () => "Access denied",
+}));
+
+mock.module("@/lib/github/app", () => ({
+  mintInstallationToken: async () => ({
+    token: "installation-token-mock",
+    expiresAt: null,
+    installationId: 999,
+    repositoryIds: [123],
+    permissions: { contents: "read" },
+  }),
+  revokeInstallationToken: async () => {},
 }));
 
 mock.module("@/lib/vercel/token", () => ({
@@ -118,6 +147,41 @@ mock.module("@/lib/db/sessions", () => ({
 mock.module("@/lib/sandbox/lifecycle-kick", () => ({
   kickSandboxLifecycleWorkflow: (input: KickCall) => {
     kickCalls.push(input);
+  },
+}));
+
+mock.module("@/lib/skills/global-skill-installer", () => ({
+  installGlobalSkills: async (params: {
+    sandbox: {
+      workingDirectory: string;
+      exec: (
+        command: string,
+        cwd: string,
+        timeoutMs: number,
+      ) => Promise<unknown>;
+    };
+    globalSkillRefs: Array<{ source: string; skillName: string }>;
+  }) => {
+    const homeResult = await params.sandbox.exec(
+      'printf %s "$HOME"',
+      params.sandbox.workingDirectory,
+      5000,
+    );
+    const home =
+      typeof homeResult === "object" &&
+      homeResult !== null &&
+      "stdout" in homeResult &&
+      typeof homeResult.stdout === "string"
+        ? homeResult.stdout
+        : "/root";
+
+    for (const ref of params.globalSkillRefs) {
+      await params.sandbox.exec(
+        `HOME='${home}' npx skills add '${ref.source}' --skill '${ref.skillName}' --agent amp -g -y --copy`,
+        params.sandbox.workingDirectory,
+        120000,
+      );
+    }
   },
 }));
 
@@ -176,7 +240,6 @@ describe("/api/sandbox lifecycle kicks", () => {
       expiresAt: 1_700_000_000,
       externalId: "user_ext_1",
     };
-    currentGitHubToken = null;
     currentDotenvContent = 'API_KEY="secret"\n';
     currentDotenvError = null;
     sessionRecord = {
@@ -231,10 +294,9 @@ describe("/api/sandbox lifecycle kicks", () => {
     expect(dotenvSyncCalls).toHaveLength(0);
   });
 
-  test("repo sandboxes broker the user GitHub token instead of embedding it", async () => {
+  test("repo sandboxes use a setup-only installation token instead of embedding it", async () => {
     const { POST } = await routeModulePromise;
 
-    currentGitHubToken = "github-user-token";
     sessionRecord.vercelProjectId = null;
     sessionRecord.vercelProjectName = null;
     sessionRecord.vercelTeamId = null;
@@ -244,6 +306,7 @@ describe("/api/sandbox lifecycle kicks", () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          sessionId: "session-1",
           repoUrl: "https://github.com/acme/private-repo",
           branch: "main",
           sandboxType: "vercel",
@@ -255,13 +318,14 @@ describe("/api/sandbox lifecycle kicks", () => {
     expect(connectConfigs[0]).toMatchObject({
       state: {
         type: "vercel",
+        sandboxName: "session_session-1",
         source: {
           repo: "https://github.com/acme/private-repo",
           branch: "main",
         },
       },
       options: {
-        githubToken: "github-user-token",
+        githubToken: "installation-token-mock",
       },
     });
     expect(connectConfigs[0]?.state.source).not.toHaveProperty("token");

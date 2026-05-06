@@ -1,4 +1,5 @@
 import { nanoid } from "nanoid";
+import { checkBotProtection } from "@/lib/botid";
 import {
   countSessionsByUserId,
   createSessionWithInitialChat,
@@ -15,15 +16,20 @@ import { sanitizeUserPreferencesForSession } from "@/lib/model-access";
 import {
   isValidGitHubRepoName,
   isValidGitHubRepoOwner,
-} from "@/lib/github/repo-identifiers";
+} from "@/lib/github/urls";
+import { checkRateLimit, rateLimitKey } from "@/lib/rate-limit";
 import { getRandomCityName } from "@/lib/random-city";
 import { getServerSession } from "@/lib/session/get-server-session";
 import {
   isManagedTemplateTrialUser,
+  MANAGED_TEMPLATE_TRIAL_GITHUB_SESSION_ERROR,
   MANAGED_TEMPLATE_TRIAL_SESSION_LIMIT,
   MANAGED_TEMPLATE_TRIAL_SESSION_LIMIT_ERROR,
 } from "@/lib/managed-template-trial";
-import { listMatchingVercelProjects } from "@/lib/vercel/projects";
+import {
+  isVercelInvalidTokenError,
+  listMatchingVercelProjects,
+} from "@/lib/vercel/projects";
 import { getUserVercelToken } from "@/lib/vercel/token";
 import {
   vercelProjectSelectionSchema,
@@ -172,7 +178,22 @@ export async function POST(req: Request) {
     return Response.json({ error: "Not authenticated" }, { status: 401 });
   }
 
-  if (isManagedTemplateTrialUser(session, req.url)) {
+  const botVerification = await checkBotProtection();
+  if (botVerification.isBot) {
+    return Response.json({ error: "Access denied" }, { status: 403 });
+  }
+
+  const limited = checkRateLimit({
+    key: rateLimitKey(["sessions-create", session.user.id]),
+    limit: 10,
+    windowMs: 60_000,
+  });
+  if (limited) {
+    return limited;
+  }
+
+  const isTrialUser = isManagedTemplateTrialUser(session, req.url);
+  if (isTrialUser) {
     const existingSessionCount = await countSessionsByUserId(session.user.id);
     if (existingSessionCount >= MANAGED_TEMPLATE_TRIAL_SESSION_LIMIT) {
       return Response.json(
@@ -187,6 +208,13 @@ export async function POST(req: Request) {
     body = (await req.json()) as CreateSessionRequest;
   } catch {
     return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  if (isTrialUser && (body.repoOwner || body.repoName || body.cloneUrl)) {
+    return Response.json(
+      { error: MANAGED_TEMPLATE_TRIAL_GITHUB_SESSION_ERROR },
+      { status: 403 },
+    );
   }
 
   if (body.sandboxType && body.sandboxType !== "vercel") {
@@ -229,6 +257,44 @@ export async function POST(req: Request) {
     (typeof body.repoName !== "string" || !isValidGitHubRepoName(body.repoName))
   ) {
     return Response.json({ error: "Invalid repository name" }, { status: 400 });
+  }
+
+  if (body.cloneUrl !== undefined) {
+    if (typeof body.cloneUrl !== "string") {
+      return Response.json({ error: "Invalid clone URL" }, { status: 400 });
+    }
+
+    let parsedCloneUrl: URL;
+    try {
+      parsedCloneUrl = new URL(body.cloneUrl);
+    } catch {
+      return Response.json({ error: "Invalid clone URL" }, { status: 400 });
+    }
+
+    if (
+      parsedCloneUrl.protocol !== "https:" ||
+      parsedCloneUrl.hostname.toLowerCase() !== "github.com"
+    ) {
+      return Response.json({ error: "Invalid clone URL" }, { status: 400 });
+    }
+
+    const clonePathParts = parsedCloneUrl.pathname
+      .replace(/^\/+/, "")
+      .split("/");
+    const [cloneOwner, cloneRepoWithSuffix] = clonePathParts;
+    const cloneRepo = cloneRepoWithSuffix?.replace(/\.git$/, "");
+    if (
+      clonePathParts.length !== 2 ||
+      !cloneOwner ||
+      !cloneRepo ||
+      cloneOwner !== body.repoOwner ||
+      cloneRepo !== body.repoName
+    ) {
+      return Response.json(
+        { error: "Clone URL must match repository owner and name" },
+        { status: 400 },
+      );
+    }
   }
 
   let explicitVercelProject: VercelProjectSelection | null | undefined;
@@ -359,6 +425,16 @@ export async function POST(req: Request) {
 
     return Response.json(result);
   } catch (error) {
+    if (isVercelInvalidTokenError(error)) {
+      console.warn(
+        `Vercel token is invalid for user ${session.user.id}; reconnect required to create a session with env sync.`,
+      );
+      return Response.json(
+        { error: "Reconnect Vercel to select a Vercel project" },
+        { status: 403 },
+      );
+    }
+
     console.error("Failed to create session:", error);
     return Response.json(
       { error: "Failed to create session" },

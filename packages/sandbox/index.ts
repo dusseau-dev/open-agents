@@ -20,6 +20,24 @@ export {
   type SandboxConnectConfig,
 } from "./factory";
 
+// git helpers
+export {
+  hasUncommittedChanges,
+  stageAll,
+  getCurrentBranch,
+  getHeadSha,
+  getStagedDiff,
+  getChangedFiles,
+  detectBinaryFiles,
+  readFileContents,
+  getFileModes,
+  syncToRemote,
+  withTemporaryGitHubAuth,
+  type FileChange,
+  type FileChangeStatus,
+  type FileWithContent,
+} from "./git";
+
 // vercel
 export {
   connectVercelSandbox,
