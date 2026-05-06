@@ -1,26 +1,13 @@
 import {
   createGateway,
   defaultSettingsMiddleware,
-  gateway as vercelAiGateway,
   wrapLanguageModel,
   type GatewayModelId,
   type JSONValue,
   type LanguageModel,
 } from "ai";
-import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import type { AnthropicLanguageModelOptions } from "@ai-sdk/anthropic";
 import type { OpenAIResponsesProviderOptions } from "@ai-sdk/openai";
-
-// Fork change: route inference through OpenRouter by default when
-// OPENROUTER_API_KEY is present. Falls back to Vercel AI Gateway otherwise.
-// See apps/web/lib/ai-provider.ts for the matching model-list adapter.
-const openRouterApiKey = process.env.OPENROUTER_API_KEY;
-const openRouterGateway = openRouterApiKey
-  ? createOpenRouter({ apiKey: openRouterApiKey })
-  : null;
-const aiGateway = openRouterGateway
-  ? (openRouterGateway as unknown as typeof vercelAiGateway)
-  : vercelAiGateway;
 
 function supportsAdaptiveAnthropicThinking(modelId: string): boolean {
   return modelId.includes("4.6") || modelId.includes("4.7");
